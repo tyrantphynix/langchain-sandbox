@@ -14,13 +14,16 @@ from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores.faiss import FAISS
 from langchain.chains.retrieval import create_retrieval_chain
 
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.prompts import MessagesPlaceholder
+from langchain.chains.history_aware_retriever import create_history_aware_retriever
 
 def get_document_from_loader(url):
     loader = WebBaseLoader(url)
     docs = loader.load()
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=200,
+        chunk_size=400,
         chunk_overlap=20
     )
     splitdocs = splitter.split_documents(docs)
@@ -42,11 +45,11 @@ def create_chain(vectorStore):
     max_tokens=200
 )
 
-    prompt = ChatPromptTemplate.from_template("""
-        Answer the user's question:
-        Context : {context}
-        Question : {input}
-    """)
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "Answer the user's questions based on the context: {context}"),
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{input}")
+    ])
 
 
     chain = create_stuff_documents_chain(
@@ -54,22 +57,48 @@ def create_chain(vectorStore):
         prompt=prompt
     )
 
-    retriever = vectorStore.as_retriever(search_kwargs={"k": 2})
+    retriever = vectorStore.as_retriever(search_kwargs={"k": 3})
+    retriever_prompt = ChatPromptTemplate.from_messages([
+        MessagesPlaceholder(variable_name="chat_history"),
+        ("human", "{input}"),
+        ("human", "Given above the conversation, generate a search query to look up in order to get nformation relevant to the conversation")
+    ])
+
+    history_aware_retriever = create_history_aware_retriever(
+        llm=model,
+        retriever=retriever,
+        prompt=retriever_prompt
+    )
 
     retrieval_chain = create_retrieval_chain(
-        retriever,
+        # retriever,
+        history_aware_retriever,
         chain
     )
 
     return retrieval_chain
 
-docs = (get_document_from_loader('https://python.langchain.com/v0.1/docs/expression_language/'))
-vectorStore = create_db(docs)
-chain = create_chain(vectorStore)
+def process_chat(chain, question, chat_history):
+    response =  chain.invoke({
+        "input": question,
+        "chat_history": chat_history
+    })
 
+    return response["answer"]
 
-response =  chain.invoke({
-    "input": "What is LCEL?"
-})
+if __name__ == '__main__':
+    docs = (get_document_from_loader('https://python.langchain.com/v0.1/docs/expression_language/'))
+    vectorStore = create_db(docs)
+    chain = create_chain(vectorStore)
 
-print(response["context"])
+    chat_history = []
+
+    while True:
+        user_input = input("You: ")
+
+        if user_input.lower() == 'exit':
+            break
+        response = process_chat(chain, user_input, chat_history)
+        chat_history.append(HumanMessage(content=user_input))
+        chat_history.append(AIMessage(content=response))
+        print("Assistant: ", response)
